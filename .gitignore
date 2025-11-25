@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+config.py
+my_userbot.session*
+downloads/
+backup_*/
+*.zip
+userbot.db
+*.log
+.DS_Store
