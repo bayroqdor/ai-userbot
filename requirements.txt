@@ -2,3 +2,5 @@ pyrogram
 tgcrypto
 google-generativeai
 yt-dlp
+pytest
+pytest-asyncio
