@@ -5,6 +5,7 @@ import shutil
 import glob
 import sqlite3
 import random
+import math
 import yt_dlp
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message
@@ -14,6 +15,7 @@ from config import API_ID, API_HASH, GEMINI_API_KEY
 # --- CONFIGURATION ---
 genai.configure(api_key=GEMINI_API_KEY)
 
+# Xavfsizlik va Model
 safety_settings = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -39,8 +41,50 @@ def init_db():
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS messages
                  (date text, chat_id integer, sender_id integer, text text, type text)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS settings
+                 (key text primary key, value text)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS sources
+                 (chat_id integer primary key, title text)''')
     conn.commit()
     conn.close()
+
+# --- HELPERS ---
+def set_setting(key, value):
+    conn = sqlite3.connect('userbot.db')
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, str(value)))
+    conn.commit()
+    conn.close()
+
+def get_setting(key):
+    conn = sqlite3.connect('userbot.db')
+    c = conn.cursor()
+    c.execute("SELECT value FROM settings WHERE key=?", (key,))
+    result = c.fetchone()
+    conn.close()
+    return result[0] if result else None
+
+def add_source_channel(chat_id, title):
+    conn = sqlite3.connect('userbot.db')
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO sources VALUES (?, ?)", (chat_id, title))
+    conn.commit()
+    conn.close()
+
+def remove_source_channel(chat_id):
+    conn = sqlite3.connect('userbot.db')
+    c = conn.cursor()
+    c.execute("DELETE FROM sources WHERE chat_id=?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+def get_all_sources():
+    conn = sqlite3.connect('userbot.db')
+    c = conn.cursor()
+    c.execute("SELECT chat_id FROM sources")
+    result = {row[0] for row in c.fetchall()}
+    conn.close()
+    return result
 
 def log_message(message: Message, msg_type="incoming"):
     try:
@@ -53,261 +97,297 @@ def log_message(message: Message, msg_type="incoming"):
         conn.close()
     except: pass
 
+# --- PROGRESS BAR FUNCTION (YANGI) ---
+def humanbytes(size):
+    """Baytlarni MB/GB ga o'girish"""
+    if not size: return ""
+    power = 2**10
+    n = 0
+    dic_powerN = {0: ' ', 1: 'Ki', 2: 'Mi', 3: 'Gi', 4: 'Ti'}
+    while size > power:
+        size /= power
+        n += 1
+    return str(round(size, 2)) + " " + dic_powerN[n] + 'B'
+
+# Oxirgi yangilangan vaqtni saqlash uchun (FloodWait oldini olish)
+last_update_time = {}
+
+async def progress_bar(current, total, message: Message, start_time, action_text):
+    now = time.time()
+    chat_id = message.chat.id
+    
+    # Har 3 soniyada yoki jarayon tugaganda yangilaymiz
+    if chat_id in last_update_time and (now - last_update_time[chat_id] < 3) and (current != total):
+        return
+
+    last_update_time[chat_id] = now
+    
+    percentage = current * 100 / total
+    speed = current / (now - start_time) if (now - start_time) > 0 else 0
+    elapsed_time = round(now - start_time) * 1000
+    time_to_completion = round((total - current) / speed) * 1000 if speed > 0 else 0
+    estimated_total_time = elapsed_time + time_to_completion
+
+    elapsed_time_str = time.strftime("%M:%S", time.gmtime(elapsed_time / 1000))
+    estimated_total_time_str = time.strftime("%M:%S", time.gmtime(estimated_total_time / 1000))
+
+    # Progress bar chizish
+    progress_str = "[{0}{1}]".format(
+        ''.join(["■" for i in range(math.floor(percentage / 10))]),
+        ''.join(["□" for i in range(10 - math.floor(percentage / 10))])
+    )
+
+    text = f"""
+{action_text}
+{progress_str} **{round(percentage, 1)}%**
+
+💾 **Hajm:** {humanbytes(current)} / {humanbytes(total)}
+⏱ **Vaqt:** {elapsed_time_str} / {estimated_total_time_str}
+🚀 **Tezlik:** {humanbytes(speed)}/s
+"""
+    try:
+        await message.edit_text(text)
+    except:
+        pass
+
+# --- AI HELPER ---
+async def summarize_news(text, channel_name):
+    prompt = f"Quyidagi yangilik '{channel_name}' kanalida chiqdi. Uning eng asosiy mazmunini 2-3 ta gap bilan O'zbek tilida yozib ber:\n\n{text}"
+    try:
+        response = await asyncio.to_thread(model.generate_content, prompt)
+        return response.text
+    except: return None
+
+# ==========================================================
 # --- HANDLERS ---
+# ==========================================================
 
 @app.on_message(filters.me & filters.command("stop", prefixes="."))
 async def stop_handler(client, message):
     chat_id = message.chat.id
     if chat_id in active_backups:
         active_backups.remove(chat_id)
-        await message.edit_text("🛑 Process stopped. Cleaning up...")
-    else:
-        await message.edit_text("⚠️ No active process to stop.")
+        await message.edit_text("🛑 Jarayon to'xtatildi.")
+    else: await message.edit_text("⚠️ To'xtatadigan jarayon yo'q.")
 
-# 1. TRANSCRIBE (.text)
+# --- SETTINGS HANDLERS ---
+@app.on_message(filters.me & filters.command("setdest", prefixes="."))
+async def set_dest_handler(client, message):
+    if len(message.command) < 2:
+        return await message.edit_text("❌ Kanal ID yoki Usernameni kiriting.")
+    target = message.command[1]
+    if target == "off":
+        set_setting("dest_channel", "off")
+        return await message.edit_text("🔕 Digest o'chirildi.")
+    try:
+        chat = await app.get_chat(target)
+        set_setting("dest_channel", chat.id)
+        await message.edit_text(f"✅ Qabul qiluvchi kanal: {chat.title}")
+    except: await message.edit_text("❌ Kanal topilmadi.")
+
+@app.on_message(filters.me & filters.command("addsource", prefixes="."))
+async def add_source_handler(client, message):
+    chat_id = message.chat.id
+    title = message.chat.title or "Kanal"
+    if len(message.command) > 1:
+        try:
+            chat = await app.get_chat(message.command[1])
+            chat_id = chat.id; title = chat.title
+        except: return await message.edit_text("❌ Kanal topilmadi.")
+    add_source_channel(chat_id, title)
+    await message.edit_text(f"✅ Kuzatuvga olindi: {title}")
+
+@app.on_message(filters.me & filters.command("delsource", prefixes="."))
+async def del_source_handler(client, message):
+    chat_id = message.chat.id
+    if len(message.command) > 1:
+        try: chat = await app.get_chat(message.command[1]); chat_id = chat.id
+        except: pass
+    remove_source_channel(chat_id)
+    await message.edit_text(f"🗑 Olib tashlandi: {chat_id}")
+
+@app.on_message(filters.me & filters.command("listsources", prefixes="."))
+async def list_sources_handler(client, message):
+    conn = sqlite3.connect('userbot.db'); c = conn.cursor()
+    c.execute("SELECT title, chat_id FROM sources"); rows = c.fetchall(); conn.close()
+    text = "📋 **Manbalar:**\n\n" + "\n".join([f"• {r[0]}" for r in rows])
+    await message.edit_text(text if rows else "📭 Bo'sh")
+
+# --- TOOLS WITH PROGRESS ---
+
+# 1. TRANSCRIBE (.text) - Progress bilan
 @app.on_message(filters.me & filters.command("text", prefixes="."))
 async def transcribe_handler(client, message):
     target = message.reply_to_message
     if not target or not (target.voice or target.audio or target.video_note or target.video):
-        await message.edit_text("❌ Reply to media file.")
+        await message.edit_text("❌ Media faylga reply qiling.")
         return
 
-    status = await message.edit_text("⬇️ Downloading...")
+    status = await message.edit_text("⬇️ Yuklanmoqda...")
     file_path = None
+    start_time = time.time()
+
     try:
-        file_path = await app.download_media(target)
-        await status.edit_text("🧠 Processing...")
-        uploaded_file = await asyncio.to_thread(genai.upload_file, file_path)
-        
-        response = await asyncio.to_thread(
-            model.generate_content, 
-            [uploaded_file, "Transcribe audio to text verbatim. Output only the text."]
+        # Download with Progress
+        file_path = await app.download_media(
+            target,
+            progress=progress_bar,
+            progress_args=(status, start_time, "⬇️ Serverga yuklanmoqda")
         )
-        await status.edit_text(f"📝 **Transcription:**\n\n{response.text}")
+        
+        await status.edit_text("🧠 Gemini Tahlil qilmoqda...")
+        uploaded_file = await asyncio.to_thread(genai.upload_file, file_path)
+        response = await asyncio.to_thread(model.generate_content, [uploaded_file, "Transcribe verbatim."])
+        await status.edit_text(f"📝 **Matn:**\n\n{response.text}")
         
     except Exception as e:
-        await status.edit_text(f"❌ Error: {str(e)}")
+        await status.edit_text(f"❌ Xato: {e}")
     finally:
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
+        if file_path and os.path.exists(file_path): os.remove(file_path)
 
-# 2. SUMMARIZE (.qisqa) - TUZATILDI
-@app.on_message(filters.me & filters.command("qisqa", prefixes="."))
-async def summarize_handler(client, message):
-    target = message.reply_to_message
-    
-    # Text yoki Caption borligini tekshiramiz
-    original_text = None
-    if target:
-        original_text = target.text or target.caption
-        
-    if not original_text:
-        await message.edit_text("❌ Matnli xabarga yoki rasm (caption) ga reply qiling.")
-        return
-
-    await message.edit_text("🧠 Reading...")
-    prompt = f"Summarize the following text in Uzbek (2-3 sentences):\n\n{original_text}"
-    
-    try:
-        response = await asyncio.to_thread(model.generate_content, prompt)
-        await message.edit_text(f"📌 **Summary:**\n\n{response.text}")
-    except Exception as e:
-        await message.edit_text(f"❌ Error: {e}")
-
-# 3. TRANSLATE (.uz, .en, .ru) - MANTIQ TUZATILDI
-@app.on_message(filters.me & filters.command(["en", "uz", "ru"], prefixes="."))
-async def translation_handler(client, message):
-    cmd = message.command[0]
-    target_map = {"en": "English", "uz": "Uzbek", "ru": "Russian"}
-    target_lang = target_map.get(cmd, "Uzbek")
-    
-    # A) REJIM: Sizning gapingizni tarjima qilish (Reply bo'lishi mumkin, lekin matn sizda)
-    # Masalan: .ru Salom ishlar qalay (Kimgadir reply qilgan holda)
-    if len(message.command) > 1:
-        text_to_translate = " ".join(message.command[1:])
-        
-        # Loading ko'rsatmaymiz, to'g'ridan-to'g'ri almashtiramiz
-        prompt = f"Translate the following text to {target_lang}. Output ONLY the translation, no extra text:\n\n{text_to_translate}"
-        try:
-            response = await asyncio.to_thread(model.generate_content, prompt)
-            await message.edit_text(response.text)
-        except:
-            pass
-            
-    # B) REJIM: Birovning gapini tarjima qilish (Reply bor, lekin sizda matn yo'q)
-    # Masalan: .ru (Birovning xabariga reply)
-    elif message.reply_to_message:
-        target = message.reply_to_message
-        original_text = target.text or target.caption
-        
-        if original_text:
-            await message.edit_text("🔄 Translating...")
-            prompt = f"Translate the following text to {target_lang}. Output only translation:\n\n{original_text}"
-            try:
-                response = await asyncio.to_thread(model.generate_content, prompt)
-                await message.edit_text(f"🌍 **Translation ({cmd.upper()}):**\n\n{response.text}")
-            except Exception as e:
-                await message.edit_text(f"❌ Error: {e}")
-        else:
-            await message.edit_text("❌ Reply qilingan xabarda matn yo'q.")
-    else:
-        await message.edit_text("⚠️ Foydalanish:\n1. `.ru Salom` (Gapirish)\n2. `.ru` (Reply qilib tushunish)")
-
-# 4. MAGIC TYPE (.type)
-@app.on_message(filters.me & filters.command("type", prefixes="."))
-async def type_handler(client, message):
-    if len(message.command) < 2: return
-    original_text = message.text.split(" ", 1)[1]
-    typed_text = ""
-    try:
-        for char in original_text:
-            typed_text += char
-            if typed_text.strip(): 
-                await message.edit_text(typed_text + " ▌") 
-                await asyncio.sleep(0.05) 
-        await message.edit_text(typed_text)
-    except:
-        await message.edit_text(original_text)
-
-# 5. DOWNLOAD VIDEO (.link)
+# 2. DOWNLOAD VIDEO (.link) - Progress bilan
 @app.on_message(filters.me & filters.command("link", prefixes="."))
 async def download_link_handler(client, message):
-    if len(message.command) < 2: return await message.edit_text("❌ No URL provided.")
+    if len(message.command) < 2: return await message.edit_text("❌ Link yo'q.")
     url = message.command[1]
-    await message.edit_text(f"🔍 Analyzing: `{url}`")
+    status = await message.edit_text(f"🔍 Tahlil qilinmoqda...")
     
     download_path = f"downloads/{message.id}"
     os.makedirs(download_path, exist_ok=True)
-    
-    ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'outtmpl': f'{download_path}/%(title)s.%(ext)s',
-        'merge_output_format': 'mp4',
-        'noplaylist': True, 'quiet': True, 'no_warnings': True, 'geo_bypass': True,
-    }
+    ydl_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'outtmpl': f'{download_path}/%(title)s.%(ext)s', 'merge_output_format': 'mp4', 'noplaylist': True, 'quiet': True, 'no_warnings': True}
     
     try:
-        await message.edit_text("⬇️ Downloading...")
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl: 
-            await asyncio.to_thread(ydl.download, [url])
-            
+        await status.edit_text("⬇️ Serverga yuklanmoqda (yt-dlp)...")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl: await asyncio.to_thread(ydl.download, [url])
         files = glob.glob(f"{download_path}/*")
-        if not files: 
-            return await message.edit_text("❌ Download failed.")
-            
-        await message.edit_text("📤 Uploading...")
+        if not files: return await status.edit_text("❌ Xato.")
+        
+        # Upload with Progress
+        start_time = time.time()
         await app.send_video(
             message.chat.id, 
             video=files[0], 
-            caption=f"🔗 Source: {url}", 
-            supports_streaming=True
+            caption=f"🔗 {url}", 
+            supports_streaming=True,
+            progress=progress_bar,
+            progress_args=(status, start_time, "📤 Telegramga yuklanmoqda")
         )
-        await message.delete()
-        
+        await status.delete() # Progress tugagach statusni o'chiramiz
+        await message.delete() # Original komandani ham
     except Exception as e:
-        await message.edit_text(f"❌ Error: {e}")
-        await asyncio.sleep(5)
-        await message.delete()
+        await status.edit_text(f"❌ {e}")
+        await asyncio.sleep(5); await status.delete()
     finally:
-        if os.path.exists(download_path):
-            shutil.rmtree(download_path)
+        if os.path.exists(download_path): shutil.rmtree(download_path)
 
-# 6. BACKUP (.backup)
+# 3. BACKUP (.backup) - Progress bilan
 @app.on_message(filters.me & filters.command("backup", prefixes="."))
 async def backup_handler(client, message):
     chat_id = message.chat.id
-    if chat_id in active_backups: return await message.edit_text("⚠️ Backup already running.")
+    if chat_id in active_backups: return await message.edit_text("⚠️ Jarayon ketmoqda.")
     active_backups.add(chat_id)
+    status = await message.edit_text("⏳ Backup boshlandi...")
+    folder = f"backup_{chat_id}_{int(time.time())}"
+    os.makedirs(f"{folder}/media", exist_ok=True)
     
-    status_msg = await message.edit_text("⏳ Backup started... (.stop to cancel)")
-    
-    folder_name = f"backup_{chat_id}_{int(time.time())}"
-    media_folder = os.path.join(folder_name, "media")
-    os.makedirs(media_folder, exist_ok=True)
-    zip_filename = f"{folder_name}.zip"
-    
-    html = """<!DOCTYPE html><html><head><meta charset="UTF-8"><style>body{font-family:sans-serif;background:#1e1e1e;color:#fff;padding:20px}.msg{margin:10px 0;padding:10px;border-radius:10px;max-width:80%;clear:both}.in{background:#2b2b2b;float:left}.out{background:#4b6ca5;float:right}.name{font-size:12px;color:#ccc;font-weight:bold}img,video{max-width:100%}</style></head><body><h2>Chat History</h2>"""
-    
-    forced_stop = False
+    forced = False
     try:
-        messages = []
-        async for msg in app.get_chat_history(chat_id, limit=300):
-            if chat_id not in active_backups: forced_stop = True; break
-            messages.append(msg)
-        messages.reverse()
+        # Xabarlarni yig'ish (Tez bo'lishi uchun progress shart emas, status yangilanadi)
+        msgs = []
+        async for m in app.get_chat_history(chat_id, limit=300):
+            if chat_id not in active_backups: forced=True; break
+            msgs.append(m)
+        msgs.reverse()
         
-        counter = 0
-        for msg in messages:
-            if chat_id not in active_backups: forced_stop = True; break
-            counter += 1
-            if counter % 10 == 0: await status_msg.edit_text(f"⏳ {counter} msgs processed... (.stop)")
+        html = "<html><body><h2>History</h2>"
+        for i, m in enumerate(msgs):
+            if chat_id not in active_backups: forced=True; break
+            if i%20==0: await status.edit_text(f"⏳ Fayllar yuklanmoqda: {i}/{len(msgs)}...")
             
-            cls = "out" if msg.from_user and msg.from_user.is_self else "in"
-            name = msg.from_user.first_name if msg.from_user else "ID"
-            text = msg.text or msg.caption or ""
-            media_tag = ""
-            
-            if msg.media and (msg.photo or msg.video or msg.voice or msg.audio):
-                try:
-                    path = await app.download_media(msg, file_name=media_folder + "/")
-                    if path:
-                        fn = os.path.basename(path)
-                        if msg.photo: media_tag = f'<br><img src="media/{fn}">'
-                        elif msg.video: media_tag = f'<br><video controls src="media/{fn}"></video>'
-                        elif msg.voice: media_tag = f'<br><audio controls src="media/{fn}"></audio>'
+            sender = m.from_user.first_name if m.from_user else "ID"
+            txt = m.text or m.caption or ""
+            med = ""
+            if m.media:
+                try: p = await app.download_media(m, file_name=f"{folder}/media/"); med = f"<br>[Media: {os.path.basename(p)}]" if p else ""
                 except: pass
-            
-            html += f'<div class="msg {cls}"><div class="name">{name}</div>{text}{media_tag}</div>'
+            html += f"<p><b>{sender}:</b> {txt} {med}</p>"
         
-        html += "</body></html>"
-        with open(os.path.join(folder_name, "index.html"), "w", encoding="utf-8") as f: f.write(html)
+        if forced: raise Exception("To'xtatildi")
         
-        await status_msg.edit_text("🗜 Archiving...")
-        shutil.make_archive(folder_name, 'zip', folder_name)
+        with open(f"{folder}/index.html", "w") as f: f.write(html+"</body></html>")
+        await status.edit_text("🗜 Arxivlanmoqda...")
+        shutil.make_archive(folder, 'zip', folder)
         
-        await status_msg.edit_text("📤 Uploading...")
+        # Upload with Progress
+        start_time = time.time()
         await app.send_document(
             "me", 
-            zip_filename, 
-            caption=f"📦 Backup: {chat_id}" + (" (STOPPED)" if forced_stop else "")
+            f"{folder}.zip", 
+            caption=f"📦 Backup: {chat_id}",
+            progress=progress_bar,
+            progress_args=(status, start_time, "📤 Arxiv yuborilmoqda")
         )
-        await status_msg.edit_text("✅ Done." if not forced_stop else "🛑 Stopped.")
+        await status.delete()
         
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Error: {e}")
-        
+    except Exception as e: await status.edit_text(f"❌ {e}")
     finally:
         if chat_id in active_backups: active_backups.remove(chat_id)
-        if os.path.exists(folder_name): shutil.rmtree(folder_name)
-        if os.path.exists(zip_filename): os.remove(zip_filename)
+        if os.path.exists(folder): shutil.rmtree(folder)
+        if os.path.exists(f"{folder}.zip"): os.remove(f"{folder}.zip")
 
-# 7. STATS
+# --- OTHER HANDLERS ---
+@app.on_message(filters.me & filters.command("qisqa", prefixes="."))
+async def summarize_manual_handler(client, message):
+    target = message.reply_to_message
+    txt = target.text or target.caption if target else None
+    if not txt: return await message.edit_text("❌ Matn yo'q.")
+    await message.edit_text("🧠 ...")
+    try: res = await asyncio.to_thread(model.generate_content, f"Summarize in Uzbek:\n{txt}"); await message.edit_text(f"📌 **Qisqa:**\n{res.text}")
+    except Exception as e: await message.edit_text(f"❌ {e}")
+
+@app.on_message(filters.me & filters.command(["en", "uz", "ru"], prefixes="."))
+async def translation_handler(client, message):
+    cmd = message.command[0]; map = {"en":"English","uz":"Uzbek","ru":"Russian"}; target = map.get(cmd, "Uzbek")
+    if len(message.command)>1:
+        txt = " ".join(message.command[1:])
+        try: res = await asyncio.to_thread(model.generate_content, f"Translate to {target} only:\n{txt}"); await message.edit_text(res.text)
+        except: pass
+    elif message.reply_to_message:
+        txt = message.reply_to_message.text or message.reply_to_message.caption
+        if txt:
+            await message.edit_text("🔄 ...")
+            try: res = await asyncio.to_thread(model.generate_content, f"Translate to {target} only:\n{txt}"); await message.edit_text(f"🌍 **{cmd.upper()}:**\n{res.text}")
+            except Exception as e: await message.edit_text(f"❌ {e}")
+
+@app.on_message(filters.me & filters.command("type", prefixes="."))
+async def type_handler(client, message):
+    if len(message.command)<2: return
+    txt = message.text.split(" ", 1)[1]; curr=""
+    try:
+        for c in txt: curr+=c; await message.edit_text(curr+" ▌"); await asyncio.sleep(0.05)
+        await message.edit_text(curr)
+    except: await message.edit_text(txt)
+
 @app.on_message(filters.me & filters.command("stats", prefixes="."))
 async def stats_handler(client, message):
-    conn = sqlite3.connect('userbot.db')
-    c = conn.cursor()
-    try:
-        c.execute("SELECT COUNT(*) FROM messages WHERE type='incoming'")
-        inc = c.fetchone()[0]
-        c.execute("SELECT COUNT(*) FROM messages WHERE type='mention'")
-        mn = c.fetchone()[0]
-        await message.edit_text(f"📊 **Stats**\n📩 Incoming Logs: {inc}\n🔔 Mentions: {mn}")
-    except: pass
-    finally: conn.close()
+    conn = sqlite3.connect('userbot.db'); c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM messages"); cnt = c.fetchone()[0]; conn.close()
+    await message.edit_text(f"📊 Jami xabarlar logi: {cnt}")
 
-# --- LOGGING HANDLERS ---
+@app.on_message(filters.channel & ~filters.me)
+async def channel_monitor(client, message):
+    if message.chat.id not in get_all_sources(): return
+    dest = get_setting("dest_channel")
+    if not dest or dest=="off": return
+    txt = message.text or message.caption
+    if txt and len(txt)>50:
+        sum_text = await summarize_news(txt, message.chat.title)
+        if sum_text: await app.send_message(int(dest), f"{sum_text}\n\n📰 {message.chat.title}\n🔗 {message.link}")
+
 @app.on_message(filters.me & filters.private)
-async def self_reply_handler(client, message):
-    log_message(message, "outgoing")
-
+async def log_out(c, m): log_message(m, "out")
 @app.on_message(filters.private & ~filters.me & ~filters.bot)
-async def incoming_dm_handler(client, message):
-    log_message(message, "incoming")
-
-@app.on_message(filters.mentioned & filters.group)
-async def mention_handler(client, message):
-    log_message(message, "mention")
-    await app.send_message("me", f"🔔 **Mentioned:**\n{message.link}")
+async def log_in(c, m): log_message(m, "in")
 
 if __name__ == "__main__":
     init_db()
