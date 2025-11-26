@@ -6,7 +6,9 @@ import glob
 import sqlite3
 import random
 import math
+import html  # Matnni xavfsizlantirish uchun
 import yt_dlp
+from datetime import datetime
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message
 import google.generativeai as genai
@@ -15,7 +17,6 @@ from config import API_ID, API_HASH, GEMINI_API_KEY
 # --- CONFIGURATION ---
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Xavfsizlik va Model
 safety_settings = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -97,9 +98,8 @@ def log_message(message: Message, msg_type="incoming"):
         conn.close()
     except: pass
 
-# --- PROGRESS BAR FUNCTION (YANGI) ---
+# --- PROGRESS BAR ---
 def humanbytes(size):
-    """Baytlarni MB/GB ga o'girish"""
     if not size: return ""
     power = 2**10
     n = 0
@@ -109,46 +109,24 @@ def humanbytes(size):
         n += 1
     return str(round(size, 2)) + " " + dic_powerN[n] + 'B'
 
-# Oxirgi yangilangan vaqtni saqlash uchun (FloodWait oldini olish)
 last_update_time = {}
 
 async def progress_bar(current, total, message: Message, start_time, action_text):
     now = time.time()
     chat_id = message.chat.id
-    
-    # Har 3 soniyada yoki jarayon tugaganda yangilaymiz
     if chat_id in last_update_time and (now - last_update_time[chat_id] < 3) and (current != total):
         return
-
     last_update_time[chat_id] = now
-    
     percentage = current * 100 / total
     speed = current / (now - start_time) if (now - start_time) > 0 else 0
-    elapsed_time = round(now - start_time) * 1000
-    time_to_completion = round((total - current) / speed) * 1000 if speed > 0 else 0
-    estimated_total_time = elapsed_time + time_to_completion
-
-    elapsed_time_str = time.strftime("%M:%S", time.gmtime(elapsed_time / 1000))
-    estimated_total_time_str = time.strftime("%M:%S", time.gmtime(estimated_total_time / 1000))
-
-    # Progress bar chizish
+    
     progress_str = "[{0}{1}]".format(
         ''.join(["■" for i in range(math.floor(percentage / 10))]),
         ''.join(["□" for i in range(10 - math.floor(percentage / 10))])
     )
-
-    text = f"""
-{action_text}
-{progress_str} **{round(percentage, 1)}%**
-
-💾 **Hajm:** {humanbytes(current)} / {humanbytes(total)}
-⏱ **Vaqt:** {elapsed_time_str} / {estimated_total_time_str}
-🚀 **Tezlik:** {humanbytes(speed)}/s
-"""
-    try:
-        await message.edit_text(text)
-    except:
-        pass
+    text = f"{action_text}\n{progress_str} **{round(percentage, 1)}%**\n💾 {humanbytes(current)} / {humanbytes(total)}\n🚀 {humanbytes(speed)}/s"
+    try: await message.edit_text(text)
+    except: pass
 
 # --- AI HELPER ---
 async def summarize_news(text, channel_name):
@@ -159,6 +137,42 @@ async def summarize_news(text, channel_name):
     except: return None
 
 # ==========================================================
+# --- HTML TEMPLATE (TELEGRAM STYLE) ---
+# ==========================================================
+HTML_HEAD = """
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat Backup</title>
+    <style>
+        body { background-color: #0e1621; color: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 20px; }
+        .container { max-width: 700px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
+        .message { max-width: 80%; padding: 8px 12px; border-radius: 12px; position: relative; font-size: 15px; line-height: 1.4; word-wrap: break-word; }
+        .incoming { align-self: flex-start; background-color: #182533; border-bottom-left-radius: 4px; }
+        .outgoing { align-self: flex-end; background-color: #2b5278; border-bottom-right-radius: 4px; }
+        .sender-name { font-weight: bold; color: #64b5f6; font-size: 13px; margin-bottom: 4px; display: block; }
+        .outgoing .sender-name { display: none; } /* O'zimizning ismimiz shart emas */
+        .meta { display: flex; justify-content: flex-end; align-items: center; gap: 4px; margin-top: 4px; font-size: 11px; color: #8fa0b5; }
+        
+        /* Media Styles */
+        img, video { max-width: 100%; border-radius: 8px; margin-bottom: 5px; display: block; }
+        audio { width: 100%; margin-top: 5px; }
+        .file-attachment { background: #00000030; padding: 10px; border-radius: 8px; display: flex; align-items: center; gap: 10px; text-decoration: none; color: white; font-weight: bold; }
+        .emoji { font-size: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+"""
+HTML_FOOTER = """
+    </div>
+</body>
+</html>
+"""
+
+# ==========================================================
 # --- HANDLERS ---
 # ==========================================================
 
@@ -167,35 +181,26 @@ async def stop_handler(client, message):
     chat_id = message.chat.id
     if chat_id in active_backups:
         active_backups.remove(chat_id)
-        await message.edit_text("🛑 Jarayon to'xtatildi.")
+        await message.edit_text("🛑 To'xtatildi.")
     else: await message.edit_text("⚠️ To'xtatadigan jarayon yo'q.")
 
-# --- SETTINGS HANDLERS ---
+# --- SETTINGS ---
 @app.on_message(filters.me & filters.command("setdest", prefixes="."))
 async def set_dest_handler(client, message):
-    if len(message.command) < 2:
-        return await message.edit_text("❌ Kanal ID yoki Usernameni kiriting.")
+    if len(message.command) < 2: return await message.edit_text("❌ ID kiriting.")
     target = message.command[1]
-    if target == "off":
-        set_setting("dest_channel", "off")
-        return await message.edit_text("🔕 Digest o'chirildi.")
-    try:
-        chat = await app.get_chat(target)
-        set_setting("dest_channel", chat.id)
-        await message.edit_text(f"✅ Qabul qiluvchi kanal: {chat.title}")
+    if target == "off": set_setting("dest_channel", "off"); return await message.edit_text("🔕 O'chirildi.")
+    try: chat = await app.get_chat(target); set_setting("dest_channel", chat.id); await message.edit_text(f"✅ Qabul: {chat.title}")
     except: await message.edit_text("❌ Kanal topilmadi.")
 
 @app.on_message(filters.me & filters.command("addsource", prefixes="."))
 async def add_source_handler(client, message):
-    chat_id = message.chat.id
-    title = message.chat.title or "Kanal"
+    chat_id = message.chat.id; title = message.chat.title or "Kanal"
     if len(message.command) > 1:
-        try:
-            chat = await app.get_chat(message.command[1])
-            chat_id = chat.id; title = chat.title
-        except: return await message.edit_text("❌ Kanal topilmadi.")
+        try: chat = await app.get_chat(message.command[1]); chat_id = chat.id; title = chat.title
+        except: return await message.edit_text("❌ Xato.")
     add_source_channel(chat_id, title)
-    await message.edit_text(f"✅ Kuzatuvga olindi: {title}")
+    await message.edit_text(f"✅ Qo'shildi: {title}")
 
 @app.on_message(filters.me & filters.command("delsource", prefixes="."))
 async def del_source_handler(client, message):
@@ -204,140 +209,202 @@ async def del_source_handler(client, message):
         try: chat = await app.get_chat(message.command[1]); chat_id = chat.id
         except: pass
     remove_source_channel(chat_id)
-    await message.edit_text(f"🗑 Olib tashlandi: {chat_id}")
+    await message.edit_text(f"🗑 Olib tashlandi.")
 
 @app.on_message(filters.me & filters.command("listsources", prefixes="."))
 async def list_sources_handler(client, message):
     conn = sqlite3.connect('userbot.db'); c = conn.cursor()
     c.execute("SELECT title, chat_id FROM sources"); rows = c.fetchall(); conn.close()
-    text = "📋 **Manbalar:**\n\n" + "\n".join([f"• {r[0]}" for r in rows])
-    await message.edit_text(text if rows else "📭 Bo'sh")
+    await message.edit_text("📋 **Manbalar:**\n\n" + "\n".join([f"• {r[0]}" for r in rows]) if rows else "📭 Bo'sh")
 
-# --- TOOLS WITH PROGRESS ---
+# --- TOOLS ---
 
-# 1. TRANSCRIBE (.text) - Progress bilan
+# 1. TRANSCRIBE (.text)
 @app.on_message(filters.me & filters.command("text", prefixes="."))
 async def transcribe_handler(client, message):
     target = message.reply_to_message
     if not target or not (target.voice or target.audio or target.video_note or target.video):
-        await message.edit_text("❌ Media faylga reply qiling.")
+        await message.edit_text("❌ Media reply qiling.")
         return
-
     status = await message.edit_text("⬇️ Yuklanmoqda...")
-    file_path = None
-    start_time = time.time()
-
+    file_path = None; start = time.time()
     try:
-        # Download with Progress
-        file_path = await app.download_media(
-            target,
-            progress=progress_bar,
-            progress_args=(status, start_time, "⬇️ Serverga yuklanmoqda")
-        )
-        
-        await status.edit_text("🧠 Gemini Tahlil qilmoqda...")
-        uploaded_file = await asyncio.to_thread(genai.upload_file, file_path)
-        response = await asyncio.to_thread(model.generate_content, [uploaded_file, "Transcribe verbatim."])
-        await status.edit_text(f"📝 **Matn:**\n\n{response.text}")
-        
-    except Exception as e:
-        await status.edit_text(f"❌ Xato: {e}")
+        file_path = await app.download_media(target, progress=progress_bar, progress_args=(status, start, "⬇️ Serverga..."))
+        await status.edit_text("🧠 Tahlil...")
+        uploaded = await asyncio.to_thread(genai.upload_file, file_path)
+        res = await asyncio.to_thread(model.generate_content, [uploaded, "Transcribe verbatim."])
+        await status.edit_text(f"📝 **Matn:**\n\n{res.text}")
+    except Exception as e: await status.edit_text(f"❌ {e}")
     finally:
         if file_path and os.path.exists(file_path): os.remove(file_path)
 
-# 2. DOWNLOAD VIDEO (.link) - Progress bilan
+# 2. DOWNLOAD (.link)
 @app.on_message(filters.me & filters.command("link", prefixes="."))
 async def download_link_handler(client, message):
     if len(message.command) < 2: return await message.edit_text("❌ Link yo'q.")
-    url = message.command[1]
-    status = await message.edit_text(f"🔍 Tahlil qilinmoqda...")
-    
-    download_path = f"downloads/{message.id}"
-    os.makedirs(download_path, exist_ok=True)
-    ydl_opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'outtmpl': f'{download_path}/%(title)s.%(ext)s', 'merge_output_format': 'mp4', 'noplaylist': True, 'quiet': True, 'no_warnings': True}
-    
+    url = message.command[1]; status = await message.edit_text(f"🔍 Tahlil...")
+    path = f"downloads/{message.id}"; os.makedirs(path, exist_ok=True)
+    opts = {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'outtmpl': f'{path}/%(title)s.%(ext)s', 'merge_output_format': 'mp4', 'noplaylist': True, 'quiet': True, 'no_warnings': True}
     try:
-        await status.edit_text("⬇️ Serverga yuklanmoqda (yt-dlp)...")
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl: await asyncio.to_thread(ydl.download, [url])
-        files = glob.glob(f"{download_path}/*")
+        await status.edit_text("⬇️ Serverga...")
+        with yt_dlp.YoutubeDL(opts) as ydl: await asyncio.to_thread(ydl.download, [url])
+        files = glob.glob(f"{path}/*")
         if not files: return await status.edit_text("❌ Xato.")
-        
-        # Upload with Progress
-        start_time = time.time()
-        await app.send_video(
-            message.chat.id, 
-            video=files[0], 
-            caption=f"🔗 {url}", 
-            supports_streaming=True,
-            progress=progress_bar,
-            progress_args=(status, start_time, "📤 Telegramga yuklanmoqda")
-        )
-        await status.delete() # Progress tugagach statusni o'chiramiz
-        await message.delete() # Original komandani ham
-    except Exception as e:
-        await status.edit_text(f"❌ {e}")
-        await asyncio.sleep(5); await status.delete()
+        await app.send_video(message.chat.id, video=files[0], caption=f"🔗 {url}", supports_streaming=True, progress=progress_bar, progress_args=(status, time.time(), "📤 Yuklanmoqda"))
+        await status.delete(); await message.delete()
+    except Exception as e: await status.edit_text(f"❌ {e}"); await asyncio.sleep(5); await status.delete()
     finally:
-        if os.path.exists(download_path): shutil.rmtree(download_path)
+        if os.path.exists(path): shutil.rmtree(path)
 
-# 3. BACKUP (.backup) - Progress bilan
+# 3. BACKUP (.backup) - FIX MEDIA & HTML
 @app.on_message(filters.me & filters.command("backup", prefixes="."))
 async def backup_handler(client, message):
     chat_id = message.chat.id
-    if chat_id in active_backups: return await message.edit_text("⚠️ Jarayon ketmoqda.")
+    if chat_id in active_backups: return await message.edit_text("⚠️ Backup ketmoqda.")
+    
+    # Argumentlarni tekshirish
+    args = message.command[1] if len(message.command) > 1 else "200"
+    limit_count = 0; start_date = None; end_date = None; mode_text = ""
+    is_date_mode = False
+
+    if "-" in args and len(args.split("-")) == 2:
+        try:
+            parts = args.split("-")
+            s_date = datetime.strptime(parts[0].strip(), "%d.%m.%Y")
+            e_date = datetime.strptime(parts[1].strip(), "%d.%m.%Y").replace(hour=23, minute=59, second=59)
+            if s_date > e_date: s_date, e_date = e_date, s_date
+            start_date, end_date, is_date_mode = s_date, e_date, True
+            mode_text = f"{start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}"
+        except: return await message.edit_text("❌ Format: `.backup 01.11.2024-05.11.2024`")
+    elif args.isdigit():
+        limit_count = int(args); mode_text = f"Oxirgi {limit_count} ta"
+    else: return await message.edit_text("❌ Xato buyruq.")
+
     active_backups.add(chat_id)
-    status = await message.edit_text("⏳ Backup boshlandi...")
-    folder = f"backup_{chat_id}_{int(time.time())}"
-    os.makedirs(f"{folder}/media", exist_ok=True)
+    status = await message.edit_text(f"⏳ Backup boshlandi... ({mode_text})")
+    
+    # Papka tuzilmasi
+    base_folder = f"backup_{chat_id}_{int(time.time())}"
+    media_folder_abs = os.path.join(base_folder, "media")
+    os.makedirs(media_folder_abs, exist_ok=True)
     
     forced = False
+    
     try:
-        # Xabarlarni yig'ish (Tez bo'lishi uchun progress shart emas, status yangilanadi)
         msgs = []
-        async for m in app.get_chat_history(chat_id, limit=300):
+        async for m in app.get_chat_history(chat_id):
             if chat_id not in active_backups: forced=True; break
-            msgs.append(m)
+            if is_date_mode:
+                if m.date > end_date: continue
+                if m.date < start_date: break
+                msgs.append(m)
+            else:
+                if len(msgs) >= limit_count: break
+                msgs.append(m)
+            if len(msgs) % 50 == 0: await status.edit_text(f"⏳ Yig'ilmoqda: {len(msgs)} ta...")
+
+        if not msgs:
+            await status.edit_text("❌ Xabarlar topilmadi.")
+            active_backups.remove(chat_id); shutil.rmtree(base_folder); return
+
         msgs.reverse()
+        html_content = HTML_HEAD
         
-        html = "<html><body><h2>History</h2>"
         for i, m in enumerate(msgs):
             if chat_id not in active_backups: forced=True; break
-            if i%20==0: await status.edit_text(f"⏳ Fayllar yuklanmoqda: {i}/{len(msgs)}...")
+            if i % 20 == 0: await status.edit_text(f"⏳ Fayllar yuklanmoqda: {i}/{len(msgs)}")
             
-            sender = m.from_user.first_name if m.from_user else "ID"
-            txt = m.text or m.caption or ""
-            med = ""
+            # Message Class
+            is_me = m.from_user and m.from_user.is_self
+            msg_class = "outgoing" if is_me else "incoming"
+            sender = html.escape(m.from_user.first_name if m.from_user else "Deleted Account")
+            text_content = html.escape(m.text or m.caption or "")
+            text_content = text_content.replace("\n", "<br>") # Line break fix
+            date_str = m.date.strftime("%H:%M")
+            
+            media_html = ""
             if m.media:
-                try: p = await app.download_media(m, file_name=f"{folder}/media/"); med = f"<br>[Media: {os.path.basename(p)}]" if p else ""
-                except: pass
-            html += f"<p><b>{sender}:</b> {txt} {med}</p>"
+                try:
+                    # Faylni yuklab olish
+                    file_path = await app.download_media(m, file_name=media_folder_abs + "/")
+                    
+                    if file_path:
+                        filename = os.path.basename(file_path)
+                        # HTML uchun relative path (media/fayl.jpg)
+                        rel_path = f"media/{filename}"
+                        
+                        if m.photo:
+                            media_html = f'<a href="{rel_path}"><img src="{rel_path}"></a>'
+                        elif m.video or m.video_note:
+                            media_html = f'<video controls><source src="{rel_path}"></video>'
+                        elif m.voice or m.audio:
+                            media_html = f'<audio controls><source src="{rel_path}"></audio>'
+                        elif m.sticker:
+                             media_html = f'<div class="file-attachment"><span class="emoji">🎭</span> Sticker: <a href="{rel_path}">{filename}</a></div>'
+                        else:
+                            media_html = f'<div class="file-attachment"><span class="emoji">📎</span> <a href="{rel_path}">{filename}</a></div>'
+                except Exception as e:
+                    print(f"Media error: {e}")
+                    media_html = f"<i>[Media yuklanmadi]</i>"
+
+            html_content += f"""
+            <div class="message {msg_class}">
+                <div class="sender-name">{sender}</div>
+                {media_html}
+                <div class="text">{text_content}</div>
+                <div class="meta">{date_str}</div>
+            </div>
+            """
+        
+        html_content += HTML_FOOTER
         
         if forced: raise Exception("To'xtatildi")
         
-        with open(f"{folder}/index.html", "w") as f: f.write(html+"</body></html>")
-        await status.edit_text("🗜 Arxivlanmoqda...")
-        shutil.make_archive(folder, 'zip', folder)
+        # HTMLni yozish
+        with open(f"{base_folder}/index.html", "w", encoding="utf-8") as f:
+            f.write(html_content)
         
-        # Upload with Progress
-        start_time = time.time()
+        await status.edit_text("🗜 Arxivlanmoqda...")
+        shutil.make_archive(base_folder, 'zip', base_folder)
+        
         await app.send_document(
-            "me", 
-            f"{folder}.zip", 
-            caption=f"📦 Backup: {chat_id}",
-            progress=progress_bar,
-            progress_args=(status, start_time, "📤 Arxiv yuborilmoqda")
+            "me", f"{base_folder}.zip", 
+            caption=f"📦 Backup: {chat_id}\n📊 {len(msgs)} ta xabar\n🎯 {mode_text}", 
+            progress=progress_bar, progress_args=(status, time.time(), "📤 Yuborilmoqda")
         )
         await status.delete()
         
     except Exception as e: await status.edit_text(f"❌ {e}")
     finally:
         if chat_id in active_backups: active_backups.remove(chat_id)
-        if os.path.exists(folder): shutil.rmtree(folder)
-        if os.path.exists(f"{folder}.zip"): os.remove(f"{folder}.zip")
+        if os.path.exists(base_folder): shutil.rmtree(base_folder)
+        if os.path.exists(f"{base_folder}.zip"): os.remove(f"{base_folder}.zip")
 
-# --- OTHER HANDLERS ---
+# 4. TRANSLATE (.tr)
+@app.on_message(filters.me & filters.command("tr", prefixes="."))
+async def translation_handler(client, message):
+    if len(message.command) < 2: return await message.edit_text("⚠️ Kod yozing: `.tr en`, `.tr uz`")
+    lang_code = message.command[1]
+    langs = {"en": "English", "ru": "Russian", "uz": "Uzbek", "tr": "Turkish", "ar": "Arabic", "de": "German"}
+    target = langs.get(lang_code, lang_code)
+
+    if len(message.command) > 2:
+        txt = " ".join(message.command[2:])
+        try: res = await asyncio.to_thread(model.generate_content, f"Translate to {target}. Output ONLY translation:\n\n{txt}"); await message.edit_text(res.text)
+        except: pass
+    elif message.reply_to_message:
+        target_msg = message.reply_to_message
+        txt = target_msg.text or target_msg.caption
+        if txt:
+            await message.edit_text(f"🔄 ...")
+            try: res = await asyncio.to_thread(model.generate_content, f"Translate to {target}. Output only translation:\n\n{txt}"); await message.edit_text(f"🌍 **{lang_code}:**\n\n{res.text}")
+            except Exception as e: await message.edit_text(f"❌ {e}")
+        else: await message.edit_text("❌ Matn yo'q.")
+    else: await message.edit_text("⚠️ Matn yozing yoki reply qiling.")
+
+# 5. QISQA (.qisqa)
 @app.on_message(filters.me & filters.command("qisqa", prefixes="."))
-async def summarize_manual_handler(client, message):
+async def summarize_handler(client, message):
     target = message.reply_to_message
     txt = target.text or target.caption if target else None
     if not txt: return await message.edit_text("❌ Matn yo'q.")
@@ -345,20 +412,7 @@ async def summarize_manual_handler(client, message):
     try: res = await asyncio.to_thread(model.generate_content, f"Summarize in Uzbek:\n{txt}"); await message.edit_text(f"📌 **Qisqa:**\n{res.text}")
     except Exception as e: await message.edit_text(f"❌ {e}")
 
-@app.on_message(filters.me & filters.command(["en", "uz", "ru"], prefixes="."))
-async def translation_handler(client, message):
-    cmd = message.command[0]; map = {"en":"English","uz":"Uzbek","ru":"Russian"}; target = map.get(cmd, "Uzbek")
-    if len(message.command)>1:
-        txt = " ".join(message.command[1:])
-        try: res = await asyncio.to_thread(model.generate_content, f"Translate to {target} only:\n{txt}"); await message.edit_text(res.text)
-        except: pass
-    elif message.reply_to_message:
-        txt = message.reply_to_message.text or message.reply_to_message.caption
-        if txt:
-            await message.edit_text("🔄 ...")
-            try: res = await asyncio.to_thread(model.generate_content, f"Translate to {target} only:\n{txt}"); await message.edit_text(f"🌍 **{cmd.upper()}:**\n{res.text}")
-            except Exception as e: await message.edit_text(f"❌ {e}")
-
+# 6. TYPE (.type)
 @app.on_message(filters.me & filters.command("type", prefixes="."))
 async def type_handler(client, message):
     if len(message.command)<2: return
@@ -372,7 +426,7 @@ async def type_handler(client, message):
 async def stats_handler(client, message):
     conn = sqlite3.connect('userbot.db'); c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM messages"); cnt = c.fetchone()[0]; conn.close()
-    await message.edit_text(f"📊 Jami xabarlar logi: {cnt}")
+    await message.edit_text(f"📊 Jami loglar: {cnt}")
 
 @app.on_message(filters.channel & ~filters.me)
 async def channel_monitor(client, message):
