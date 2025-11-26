@@ -6,15 +6,17 @@ import glob
 import sqlite3
 import random
 import math
-import html  # Matnni xavfsizlantirish uchun
+import html
 import yt_dlp
-from datetime import datetime
+from datetime import datetime, timedelta
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message
 import google.generativeai as genai
 from config import API_ID, API_HASH, GEMINI_API_KEY
 
-# --- CONFIGURATION ---
+# ==========================================================
+# --- 1. SOZLAMALAR ---
+# ==========================================================
 genai.configure(api_key=GEMINI_API_KEY)
 
 safety_settings = [
@@ -33,10 +35,12 @@ except:
         model = genai.GenerativeModel('gemini-pro', safety_settings=safety_settings)
 
 app = Client("my_userbot", api_id=API_ID, api_hash=API_HASH)
-
 active_backups = set()
 
-# --- DATABASE ---
+# ==========================================================
+# --- 2. BAZA VA YORDAMCHI FUNKSIYALAR ---
+# ==========================================================
+
 def init_db():
     conn = sqlite3.connect('userbot.db')
     c = conn.cursor()
@@ -49,7 +53,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- HELPERS ---
 def set_setting(key, value):
     conn = sqlite3.connect('userbot.db')
     c = conn.cursor()
@@ -136,44 +139,30 @@ async def summarize_news(text, channel_name):
         return response.text
     except: return None
 
-# ==========================================================
-# --- HTML TEMPLATE (TELEGRAM STYLE) ---
-# ==========================================================
+# --- HTML STYLES (TELEGRAM DARK MODE) ---
 HTML_HEAD = """
 <!DOCTYPE html>
 <html lang="uz">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chat Backup</title>
-    <style>
-        body { background-color: #0e1621; color: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 20px; }
-        .container { max-width: 700px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
-        .message { max-width: 80%; padding: 8px 12px; border-radius: 12px; position: relative; font-size: 15px; line-height: 1.4; word-wrap: break-word; }
-        .incoming { align-self: flex-start; background-color: #182533; border-bottom-left-radius: 4px; }
-        .outgoing { align-self: flex-end; background-color: #2b5278; border-bottom-right-radius: 4px; }
-        .sender-name { font-weight: bold; color: #64b5f6; font-size: 13px; margin-bottom: 4px; display: block; }
-        .outgoing .sender-name { display: none; } /* O'zimizning ismimiz shart emas */
-        .meta { display: flex; justify-content: flex-end; align-items: center; gap: 4px; margin-top: 4px; font-size: 11px; color: #8fa0b5; }
-        
-        /* Media Styles */
-        img, video { max-width: 100%; border-radius: 8px; margin-bottom: 5px; display: block; }
-        audio { width: 100%; margin-top: 5px; }
-        .file-attachment { background: #00000030; padding: 10px; border-radius: 8px; display: flex; align-items: center; gap: 10px; text-decoration: none; color: white; font-weight: bold; }
-        .emoji { font-size: 20px; }
-    </style>
+<meta charset="UTF-8">
+<style>
+    body { background-color: #0e1621; color: #fff; font-family: sans-serif; margin: 0; padding: 20px; }
+    .container { max-width: 700px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
+    .message { max-width: 80%; padding: 8px 12px; border-radius: 12px; position: relative; font-size: 15px; word-wrap: break-word; }
+    .incoming { align-self: flex-start; background-color: #182533; }
+    .outgoing { align-self: flex-end; background-color: #2b5278; }
+    .sender-name { font-weight: bold; color: #64b5f6; font-size: 13px; margin-bottom: 4px; display: block; }
+    .meta { font-size: 11px; color: #8fa0b5; text-align: right; margin-top: 4px; }
+    img, video { max-width: 100%; border-radius: 8px; margin-bottom: 5px; display: block; }
+    audio { width: 100%; margin-top: 5px; }
+</style>
 </head>
-<body>
-    <div class="container">
+<body><div class="container">
 """
-HTML_FOOTER = """
-    </div>
-</body>
-</html>
-"""
+HTML_FOOTER = "</div></body></html>"
 
 # ==========================================================
-# --- HANDLERS ---
+# --- 3. HANDLERS ---
 # ==========================================================
 
 @app.on_message(filters.me & filters.command("stop", prefixes="."))
@@ -182,7 +171,7 @@ async def stop_handler(client, message):
     if chat_id in active_backups:
         active_backups.remove(chat_id)
         await message.edit_text("🛑 To'xtatildi.")
-    else: await message.edit_text("⚠️ To'xtatadigan jarayon yo'q.")
+    else: await message.edit_text("⚠️ Jarayon yo'q.")
 
 # --- SETTINGS ---
 @app.on_message(filters.me & filters.command("setdest", prefixes="."))
@@ -256,13 +245,12 @@ async def download_link_handler(client, message):
     finally:
         if os.path.exists(path): shutil.rmtree(path)
 
-# 3. BACKUP (.backup) - FIX MEDIA & HTML
+# 3. BACKUP (.backup) - SANA VA SONI BILAN
 @app.on_message(filters.me & filters.command("backup", prefixes="."))
 async def backup_handler(client, message):
     chat_id = message.chat.id
     if chat_id in active_backups: return await message.edit_text("⚠️ Backup ketmoqda.")
     
-    # Argumentlarni tekshirish
     args = message.command[1] if len(message.command) > 1 else "200"
     limit_count = 0; start_date = None; end_date = None; mode_text = ""
     is_date_mode = False
@@ -282,12 +270,9 @@ async def backup_handler(client, message):
 
     active_backups.add(chat_id)
     status = await message.edit_text(f"⏳ Backup boshlandi... ({mode_text})")
-    
-    # Papka tuzilmasi
     base_folder = f"backup_{chat_id}_{int(time.time())}"
     media_folder_abs = os.path.join(base_folder, "media")
     os.makedirs(media_folder_abs, exist_ok=True)
-    
     forced = False
     
     try:
@@ -309,98 +294,75 @@ async def backup_handler(client, message):
 
         msgs.reverse()
         html_content = HTML_HEAD
-        
         for i, m in enumerate(msgs):
             if chat_id not in active_backups: forced=True; break
             if i % 20 == 0: await status.edit_text(f"⏳ Fayllar yuklanmoqda: {i}/{len(msgs)}")
-            
-            # Message Class
-            is_me = m.from_user and m.from_user.is_self
-            msg_class = "outgoing" if is_me else "incoming"
-            sender = html.escape(m.from_user.first_name if m.from_user else "Deleted Account")
-            text_content = html.escape(m.text or m.caption or "")
-            text_content = text_content.replace("\n", "<br>") # Line break fix
+            is_me = m.from_user and m.from_user.is_self; msg_class = "outgoing" if is_me else "incoming"
+            sender = html.escape(m.from_user.first_name if m.from_user else "Deleted")
+            text_content = html.escape(m.text or m.caption or "").replace("\n", "<br>")
             date_str = m.date.strftime("%H:%M")
-            
             media_html = ""
             if m.media:
                 try:
-                    # Faylni yuklab olish
-                    file_path = await app.download_media(m, file_name=media_folder_abs + "/")
-                    
-                    if file_path:
-                        filename = os.path.basename(file_path)
-                        # HTML uchun relative path (media/fayl.jpg)
-                        rel_path = f"media/{filename}"
-                        
-                        if m.photo:
-                            media_html = f'<a href="{rel_path}"><img src="{rel_path}"></a>'
-                        elif m.video or m.video_note:
-                            media_html = f'<video controls><source src="{rel_path}"></video>'
-                        elif m.voice or m.audio:
-                            media_html = f'<audio controls><source src="{rel_path}"></audio>'
-                        elif m.sticker:
-                             media_html = f'<div class="file-attachment"><span class="emoji">🎭</span> Sticker: <a href="{rel_path}">{filename}</a></div>'
-                        else:
-                            media_html = f'<div class="file-attachment"><span class="emoji">📎</span> <a href="{rel_path}">{filename}</a></div>'
-                except Exception as e:
-                    print(f"Media error: {e}")
-                    media_html = f"<i>[Media yuklanmadi]</i>"
-
-            html_content += f"""
-            <div class="message {msg_class}">
-                <div class="sender-name">{sender}</div>
-                {media_html}
-                <div class="text">{text_content}</div>
-                <div class="meta">{date_str}</div>
-            </div>
-            """
+                    fp = await app.download_media(m, file_name=media_folder_abs + "/")
+                    if fp:
+                        fn = os.path.basename(fp); rel = f"media/{fn}"
+                        if m.photo: media_html = f'<a href="{rel}"><img src="{rel}"></a>'
+                        elif m.video or m.video_note: media_html = f'<video controls><source src="{rel}"></video>'
+                        elif m.voice or m.audio: media_html = f'<audio controls><source src="{rel}"></audio>'
+                        else: media_html = f'<a href="{rel}">📎 {fn}</a>'
+                except: pass
+            html_content += f'<div class="message {msg_class}"><span class="sender-name">{sender}</span>{media_html}<div class="text">{text_content}</div><div class="meta">{date_str}</div></div>'
         
         html_content += HTML_FOOTER
-        
         if forced: raise Exception("To'xtatildi")
-        
-        # HTMLni yozish
-        with open(f"{base_folder}/index.html", "w", encoding="utf-8") as f:
-            f.write(html_content)
-        
+        with open(f"{base_folder}/index.html", "w", encoding="utf-8") as f: f.write(html_content)
         await status.edit_text("🗜 Arxivlanmoqda...")
         shutil.make_archive(base_folder, 'zip', base_folder)
-        
-        await app.send_document(
-            "me", f"{base_folder}.zip", 
-            caption=f"📦 Backup: {chat_id}\n📊 {len(msgs)} ta xabar\n🎯 {mode_text}", 
-            progress=progress_bar, progress_args=(status, time.time(), "📤 Yuborilmoqda")
-        )
+        await app.send_document("me", f"{base_folder}.zip", caption=f"📦 Backup: {chat_id}\n📊 {len(msgs)} ta\n🎯 {mode_text}", progress=progress_bar, progress_args=(status, time.time(), "📤 Yuborilmoqda"))
         await status.delete()
-        
     except Exception as e: await status.edit_text(f"❌ {e}")
     finally:
         if chat_id in active_backups: active_backups.remove(chat_id)
         if os.path.exists(base_folder): shutil.rmtree(base_folder)
         if os.path.exists(f"{base_folder}.zip"): os.remove(f"{base_folder}.zip")
 
-# 4. TRANSLATE (.tr)
-@app.on_message(filters.me & filters.command("tr", prefixes="."))
+# 4. TRANSLATE (.tr, .uz, .en, .ru) 
+@app.on_message(filters.me & filters.command(["tr", "uz", "en", "ru"], prefixes="."))
 async def translation_handler(client, message):
-    if len(message.command) < 2: return await message.edit_text("⚠️ Kod yozing: `.tr en`, `.tr uz`")
-    lang_code = message.command[1]
+    cmd = message.command[0]
+    # Tilni aniqlash
+    if cmd == "tr":
+        if len(message.command) < 2: return await message.edit_text("⚠️ Kod yozing: `.tr en`")
+        lang_code = message.command[1]
+        text_args = message.command[2:] # .tr en Hello World
+    else:
+        lang_code = cmd # .uz, .en, .ru
+        text_args = message.command[1:] # .uz Hello World
+
     langs = {"en": "English", "ru": "Russian", "uz": "Uzbek", "tr": "Turkish", "ar": "Arabic", "de": "German"}
     target = langs.get(lang_code, lang_code)
 
-    if len(message.command) > 2:
-        txt = " ".join(message.command[2:])
-        try: res = await asyncio.to_thread(model.generate_content, f"Translate to {target}. Output ONLY translation:\n\n{txt}"); await message.edit_text(res.text)
+    # 1. Matn yozilgan bo'lsa (Tarjima qilib EDIT qilish)
+    if text_args:
+        txt = " ".join(text_args)
+        try:
+            res = await asyncio.to_thread(model.generate_content, f"Translate to {target}. Output ONLY translation:\n\n{txt}")
+            await message.edit_text(res.text)
         except: pass
+    
+    # 2. Reply qilingan bo'lsa (Birovning gapini tarjima qilish)
     elif message.reply_to_message:
         target_msg = message.reply_to_message
         txt = target_msg.text or target_msg.caption
         if txt:
             await message.edit_text(f"🔄 ...")
-            try: res = await asyncio.to_thread(model.generate_content, f"Translate to {target}. Output only translation:\n\n{txt}"); await message.edit_text(f"🌍 **{lang_code}:**\n\n{res.text}")
+            try:
+                res = await asyncio.to_thread(model.generate_content, f"Translate to {target}. Output only translation:\n\n{txt}")
+                await message.edit_text(f"🌍 **{lang_code.upper()}:**\n\n{res.text}")
             except Exception as e: await message.edit_text(f"❌ {e}")
         else: await message.edit_text("❌ Matn yo'q.")
-    else: await message.edit_text("⚠️ Matn yozing yoki reply qiling.")
+    else: await message.edit_text(f"⚠️ Namuna:\n`.{lang_code} Salom`\n`.{lang_code}` (Reply)")
 
 # 5. QISQA (.qisqa)
 @app.on_message(filters.me & filters.command("qisqa", prefixes="."))
