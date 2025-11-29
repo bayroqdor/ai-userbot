@@ -95,8 +95,10 @@ def log_message(message: Message, msg_type="incoming"):
         conn = sqlite3.connect('userbot.db')
         c = conn.cursor()
         text = message.text or message.caption or "[Media]"
+        # Convert datetime to ISO format string
+        date_str = message.date.isoformat() if message.date else datetime.now().isoformat()
         c.execute("INSERT INTO messages VALUES (?, ?, ?, ?, ?)", 
-                  (message.date, message.chat.id, message.from_user.id if message.from_user else 0, text, msg_type))
+                  (date_str, message.chat.id, message.from_user.id if message.from_user else 0, text, msg_type))
         conn.commit()
         conn.close()
     except: pass

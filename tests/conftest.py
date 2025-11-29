@@ -13,8 +13,11 @@ def patch_sqlite_tmp_db(tmp_path, monkeypatch):
     """
     db_path = tmp_path / "userbot.db"
 
+    # Save the original connect function before patching
+    original_connect = sqlite3.connect
+
     def _connect_override(*args, **kwargs):
-        return sqlite3.connect(db_path)
+        return original_connect(db_path)
 
     # main ichidagi sqlite3 modulining connect funksiyasini almashtiramiz
     monkeypatch.setattr(main.sqlite3, "connect", _connect_override)
@@ -120,4 +123,18 @@ def fake_client(monkeypatch, fake_chat):
         async def get_chat(self, target):
             return fake_chat(chat_id=999, title="Dest Chat")
 
-        asy
+        async def send_message(self, chat_id, text, **kwargs):
+            self._sent_messages.append({"chat_id": chat_id, "text": text})
+
+        async def download_media(self, message, progress=None, progress_args=None, file_name=None):
+            return "downloads/test_file.mp4"
+
+        async def send_video(self, chat_id, video, caption=None, **kwargs):
+            self._sent_videos.append({"chat_id": chat_id, "video": video, "caption": caption})
+
+        async def send_document(self, chat_id, document, caption=None, **kwargs):
+            self._sent_docs.append({"chat_id": chat_id, "document": document, "caption": caption})
+
+    client = FakeClient()
+    monkeypatch.setattr(main, "app", client)
+    return client
